@@ -6,17 +6,20 @@
   "scripts": {
     "dev": "portless nfrnz vite dev",
     "build": "bun typecheck && vite build",
-    "typecheck": "tsc --noEmit",
+    "interop": "elm-ts-interop --output src/Main.elm.d.ts",
+    "typecheck": "bun run interop && tsc --noEmit",
     "preview": "vite preview"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",
     "@types/bun": "^1.4.1",
     "elm": "^0.19.2-0",
+    "elm-ts-interop": "^0.0.8",
     "shadcn": "^4.21.0",
     "tailwindcss": "^4.3.3",
     "typescript": "^7.0.2",
-    "vite": "^8.2.2",
+    "vite": "^7.0.0",
+    "vite-plugin-elm": "^3.0.1",
     "vite-plugin-elm-watch": "^2.0.0"
   }
 }

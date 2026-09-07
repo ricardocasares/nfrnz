@@ -3,8 +3,8 @@ import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defineConfig, normalizePath } from 'vite';
-import elm from 'vite-plugin-elm-watch';
-import tailwindcss from '@tailwindcss/vite';
+import elm from 'vite-plugin-elm';
+import css from '@tailwindcss/vite';
 
 const root = fileURLToPath(new URL('.', import.meta.url));
 const elmJson = JSON.parse(readFileSync(resolve(root, 'elm.json'), 'utf8'));
@@ -28,6 +28,6 @@ export default defineConfig({
         }
       },
     },
-    tailwindcss(),
+    css(),
   ],
 });
