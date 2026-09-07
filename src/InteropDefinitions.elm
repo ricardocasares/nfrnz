@@ -1,6 +1,7 @@
 module InteropDefinitions exposing (Flags, FromElm(..), ToElm(..), interop)
 
 import Json.Encode
+import Tuple
 import TsJson.Decode as TsDecode exposing (Decoder)
 import TsJson.Encode as TsEncode exposing (Encoder, optional, required)
 
@@ -18,7 +19,7 @@ interop =
 
 
 type FromElm
-    = Alert String
+    = StorageSet String String
 
 
 type ToElm
@@ -30,19 +31,23 @@ type alias User =
 
 
 type alias Flags =
-    {}
+    { theme : String }
 
 
 fromElm : Encoder FromElm
 fromElm =
     TsEncode.union
-        (\vAlert value ->
+        (\vStorageSet value ->
             case value of
-                Alert string ->
-                    vAlert string
+                StorageSet key storageValue ->
+                    vStorageSet ( key, storageValue )
         )
-        |> TsEncode.variantTagged "alert"
-            (TsEncode.object [ required "message" identity TsEncode.string ])
+        |> TsEncode.variantTagged "storageSet"
+            (TsEncode.object
+                [ required "key" Tuple.first TsEncode.string
+                , required "value" Tuple.second TsEncode.string
+                ]
+            )
         |> TsEncode.buildUnion
 
 
@@ -60,4 +65,5 @@ toElm =
 
 flags : Decoder Flags
 flags =
-    TsDecode.null {}
+    TsDecode.map Flags
+        (TsDecode.field "theme" TsDecode.string)

@@ -16,6 +16,8 @@ import ChadCn.Textarea as Textarea
 import Html exposing (Html, div, form, h1, header, main_, p, section, span, text)
 import Html.Attributes exposing (attribute, class, classList, id, rows, title)
 import Html.Events exposing (onClick, onSubmit, preventDefaultOn)
+import InteropDefinitions exposing (FromElm(..), ToElm(..))
+import InteropPorts
 import Json.Decode as Decode
 import Task
 import Url exposing (Url)
@@ -47,6 +49,34 @@ type Theme
     | Dark
 
 
+themeStorageKey : String
+themeStorageKey =
+    "theme"
+
+
+themeToString : Theme -> String
+themeToString theme =
+    case theme of
+        Light ->
+            "light"
+
+        Dark ->
+            "dark"
+
+
+themeFromString : String -> Maybe Theme
+themeFromString string =
+    case string of
+        "light" ->
+            Just Light
+
+        "dark" ->
+            Just Dark
+
+        _ ->
+            Nothing
+
+
 type Msg
     = UrlRequested Browser.UrlRequest
     | UrlChanged Url
@@ -63,12 +93,13 @@ type Msg
     | CloseMobileSidebar
     | ToggleTheme
     | DomFinished
+    | InteropMsgReceived (Result Decode.Error ToElm)
 
 
-main : Program () Model Msg
+main : Program Decode.Value Model Msg
 main =
     Browser.application
-        { init = \_ url key -> ( initialModel url key, Cmd.none )
+        { init = init
         , onUrlRequest = UrlRequested
         , onUrlChange = UrlChanged
         , update = update
@@ -76,6 +107,7 @@ main =
             \model ->
                 Sub.batch
                     [ Select.subscriptions modelSelectConfig model.current.modelSelect
+                    , InteropPorts.toElm |> Sub.map InteropMsgReceived
                     , Browser.Events.onKeyDown
                         (Decode.field "key" Decode.string
                             |> Decode.andThen
@@ -92,8 +124,20 @@ main =
         }
 
 
-initialModel : Url -> Nav.Key -> Model
-initialModel url key =
+init : Decode.Value -> Url -> Nav.Key -> ( Model, Cmd Msg )
+init flagsValue url key =
+    let
+        theme =
+            InteropPorts.decodeFlags flagsValue
+                |> Result.toMaybe
+                |> Maybe.andThen (\flags -> themeFromString flags.theme)
+                |> Maybe.withDefault Light
+    in
+    ( initialModel url key theme, Cmd.none )
+
+
+initialModel : Url -> Nav.Key -> Theme -> Model
+initialModel url key theme =
     { key = key
     , url = url
     , current = emptyConversation 0
@@ -102,7 +146,7 @@ initialModel url key =
     , sidebar = Sidebar.Expanded
     , mobileSidebar = False
     , search = ""
-    , theme = Light
+    , theme = theme
     }
 
 
@@ -237,19 +281,26 @@ update msg model =
             )
 
         ToggleTheme ->
-            ( { model
-                | theme =
+            let
+                theme =
                     case model.theme of
                         Light ->
                             Dark
 
                         Dark ->
                             Light
-              }
-            , Cmd.none
+            in
+            ( { model | theme = theme }
+            , InteropPorts.fromElm (StorageSet themeStorageKey (themeToString theme))
             )
 
         DomFinished ->
+            ( model, Cmd.none )
+
+        InteropMsgReceived (Ok (AuthenticatedUser _)) ->
+            ( model, Cmd.none )
+
+        InteropMsgReceived (Err _) ->
             ( model, Cmd.none )
 
 

@@ -21,11 +21,11 @@ export interface ElmApp {
   };
 }
 
-export type FromElm = { data : { message : string }; tag : "alert" };
+export type FromElm = { data : { key : string; value : string }; tag : "storageSet" };
 
 export type ToElm = { tag : "authenticatedUser"; username : string };
 
-export type Flags = null;
+export type Flags = { theme : string };
 
 export namespace Main {
   function init(options: { node?: HTMLElement | null; flags: Flags }): ElmApp;
