@@ -1,4 +1,4 @@
-module InteropDefinitions exposing (ChatTurn, Flags, FromElm(..), StreamRequest, ToElm(..), interop)
+module InteropDefinitions exposing (ChatTurn, Flags, FromElm(..), PeerRequest, StreamRequest, ToElm(..), interop)
 
 import Json.Encode
 import Tuple
@@ -23,6 +23,9 @@ type FromElm
     | StorageGet String
     | StreamStart StreamRequest
     | StreamCancel String
+    | ShareModels (List String)
+    | AskPeer PeerRequest
+    | RejectPeer String String String
 
 
 type ToElm
@@ -30,6 +33,20 @@ type ToElm
     | StreamChunk String String
     | StreamDone String
     | StreamError String String
+    | PeerJoined String
+    | PeerLeft String
+    | PeerModelsUpdated String (List String)
+    | PeerAsked PeerRequest
+
+
+{-| Describes one completion asked of, or by, a peer.
+-}
+type alias PeerRequest =
+    { requestId : String
+    , peerId : String
+    , model : String
+    , messages : List ChatTurn
+    }
 
 
 {-| Describes one streamed completion, either for us or relayed to a peer.
@@ -62,7 +79,7 @@ type alias Flags =
 fromElm : Encoder FromElm
 fromElm =
     TsEncode.union
-        (\vStorageSet vStorageGet vStreamStart vStreamCancel value ->
+        (\vStorageSet vStorageGet vStreamStart vStreamCancel vShareModels vAskPeer vRejectPeer value ->
             case value of
                 StorageSet key storageValue ->
                     vStorageSet ( key, storageValue )
@@ -75,6 +92,15 @@ fromElm =
 
                 StreamCancel requestId ->
                     vStreamCancel requestId
+
+                ShareModels shared ->
+                    vShareModels shared
+
+                AskPeer request ->
+                    vAskPeer request
+
+                RejectPeer requestId peerId reason ->
+                    vRejectPeer { requestId = requestId, peerId = peerId, reason = reason }
         )
         |> TsEncode.variantTagged "storageSet"
             (TsEncode.object
@@ -96,6 +122,16 @@ fromElm =
             )
         |> TsEncode.variantTagged "streamCancel"
             (TsEncode.object [ required "requestId" identity TsEncode.string ])
+        |> TsEncode.variantTagged "shareModels"
+            (TsEncode.object [ required "models" identity (TsEncode.list TsEncode.string) ])
+        |> TsEncode.variantTagged "askPeer" peerRequest
+        |> TsEncode.variantTagged "rejectPeer"
+            (TsEncode.object
+                [ required "requestId" .requestId TsEncode.string
+                , required "peerId" .peerId TsEncode.string
+                , required "reason" .reason TsEncode.string
+                ]
+            )
         |> TsEncode.buildUnion
 
 
@@ -104,6 +140,16 @@ chatTurn =
     TsEncode.object
         [ required "role" .role TsEncode.string
         , required "content" .content TsEncode.string
+        ]
+
+
+peerRequest : Encoder PeerRequest
+peerRequest =
+    TsEncode.object
+        [ required "requestId" .requestId TsEncode.string
+        , required "peerId" .peerId TsEncode.string
+        , required "model" .model TsEncode.string
+        , required "messages" .messages (TsEncode.list chatTurn)
         ]
 
 
@@ -128,7 +174,34 @@ toElm =
                 (TsDecode.field "requestId" TsDecode.string)
                 (TsDecode.field "reason" TsDecode.string)
           )
+        , ( "peerJoined"
+          , TsDecode.map PeerJoined (TsDecode.field "peerId" TsDecode.string)
+          )
+        , ( "peerLeft"
+          , TsDecode.map PeerLeft (TsDecode.field "peerId" TsDecode.string)
+          )
+        , ( "peerModelsUpdated"
+          , TsDecode.map2 PeerModelsUpdated
+                (TsDecode.field "peerId" TsDecode.string)
+                (TsDecode.field "models" (TsDecode.list TsDecode.string))
+          )
+        , ( "peerAsked"
+          , TsDecode.map PeerAsked
+                (TsDecode.map4 PeerRequest
+                    (TsDecode.field "requestId" TsDecode.string)
+                    (TsDecode.field "peerId" TsDecode.string)
+                    (TsDecode.field "model" TsDecode.string)
+                    (TsDecode.field "messages" (TsDecode.list chatTurnDecoder))
+                )
+          )
         ]
+
+
+chatTurnDecoder : Decoder ChatTurn
+chatTurnDecoder =
+    TsDecode.map2 ChatTurn
+        (TsDecode.field "role" TsDecode.string)
+        (TsDecode.field "content" TsDecode.string)
 
 
 flags : Decoder Flags

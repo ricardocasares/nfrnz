@@ -1,8 +1,12 @@
 import './style.css';
+import { joinRoom } from '@trystero-p2p/nostr';
 import { Elm } from './Main.elm';
 import type { FromElm } from './Main.elm';
 
 type StreamRequest = Extract<FromElm, { tag: 'streamStart' }>['data'];
+type PeerRequest = Extract<FromElm, { tag: 'askPeer' }>['data'];
+type PeerChunk = { requestId: string; content: string };
+type PeerEnd = { requestId: string; reason: string | null };
 
 const app = Elm.Main.init({
   flags: {
@@ -14,6 +18,75 @@ const app = Elm.Main.init({
 
 /** Cancels in-flight completions by request id. */
 const streams = new Map<string, AbortController>();
+
+/** Names the peer a relayed completion streams out to, by request id. */
+const relays = new Map<string, string>();
+
+/** Remembers which peer we asked, so a disconnect can end that request. */
+const asked = new Map<string, string>();
+
+const room = joinRoom({ appId: 'nfrnz-lobby-v1' }, 'lobby');
+const models = room.makeAction<string[]>('models');
+const ask = room.makeAction<PeerRequest>('ask');
+const chunks = room.makeAction<PeerChunk>('chunk');
+const ends = room.makeAction<PeerEnd>('end');
+
+/** The models we currently share, rebroadcast to peers that arrive later. */
+let shared: string[] = [];
+
+room.onPeerJoin = (peerId) => {
+  app.ports.interopToElm.send({ tag: 'peerJoined', peerId });
+  void models.send(shared, { target: peerId });
+};
+
+room.onPeerLeave = (peerId) => {
+  app.ports.interopToElm.send({ tag: 'peerLeft', peerId });
+
+  for (const [requestId, servingPeer] of asked) {
+    if (servingPeer !== peerId) continue;
+    asked.delete(requestId);
+    app.ports.interopToElm.send({ tag: 'streamError', requestId, reason: 'Peer disconnected' });
+  }
+
+  for (const [requestId, listener] of relays) {
+    if (listener !== peerId) continue;
+    streams.get(requestId)?.abort();
+    streams.delete(requestId);
+    relays.delete(requestId);
+  }
+};
+
+models.onMessage = (shares, { peerId }) => {
+  app.ports.interopToElm.send({
+    tag: 'peerModelsUpdated',
+    peerId,
+    models: Array.isArray(shares) ? shares.filter((model) => typeof model === 'string') : [],
+  });
+};
+
+ask.onMessage = (request, { peerId }) => {
+  app.ports.interopToElm.send({ tag: 'peerAsked', ...request, peerId });
+};
+
+chunks.onMessage = (chunk, { peerId }) => {
+  if (asked.get(chunk.requestId) !== peerId) return;
+  app.ports.interopToElm.send({
+    tag: 'streamChunk',
+    requestId: chunk.requestId,
+    content: chunk.content,
+  });
+};
+
+ends.onMessage = (end, { peerId }) => {
+  if (asked.get(end.requestId) !== peerId) return;
+  asked.delete(end.requestId);
+
+  app.ports.interopToElm.send(
+    end.reason === null
+      ? { tag: 'streamDone', requestId: end.requestId }
+      : { tag: 'streamError', requestId: end.requestId, reason: end.reason },
+  );
+};
 
 app.ports.interopFromElm.subscribe((fromElm) => {
   switch (fromElm.tag) {
@@ -36,6 +109,24 @@ app.ports.interopFromElm.subscribe((fromElm) => {
     case 'streamCancel':
       streams.get(fromElm.data.requestId)?.abort();
       streams.delete(fromElm.data.requestId);
+      asked.delete(fromElm.data.requestId);
+      break;
+
+    case 'shareModels':
+      shared = fromElm.data.models;
+      void models.send(shared);
+      break;
+
+    case 'askPeer':
+      asked.set(fromElm.data.requestId, fromElm.data.peerId);
+      void ask.send(fromElm.data, { target: fromElm.data.peerId });
+      break;
+
+    case 'rejectPeer':
+      void ends.send(
+        { requestId: fromElm.data.requestId, reason: fromElm.data.reason },
+        { target: fromElm.data.peerId },
+      );
       break;
 
     default:
@@ -45,9 +136,24 @@ app.ports.interopFromElm.subscribe((fromElm) => {
 
 /** Streams one chat completion, forwarding its deltas as they arrive. */
 async function stream(request: StreamRequest): Promise<void> {
-  const { requestId, baseUrl, apiKey, model, messages } = request;
+  const { requestId, replyTo, baseUrl, apiKey, model, messages } = request;
   const controller = new AbortController();
   streams.set(requestId, controller);
+  if (replyTo !== undefined) relays.set(requestId, replyTo);
+
+  const emitChunk = (content: string) =>
+    replyTo === undefined
+      ? app.ports.interopToElm.send({ tag: 'streamChunk', requestId, content })
+      : void chunks.send({ requestId, content }, { target: replyTo });
+
+  const emitEnd = (reason: string | null) =>
+    replyTo === undefined
+      ? app.ports.interopToElm.send(
+          reason === null
+            ? { tag: 'streamDone', requestId }
+            : { tag: 'streamError', requestId, reason },
+        )
+      : void ends.send({ requestId, reason }, { target: replyTo });
 
   try {
     const response = await fetch(`${baseUrl}/v1/chat/completions`, {
@@ -65,20 +171,17 @@ async function stream(request: StreamRequest): Promise<void> {
     }
 
     for await (const delta of deltas(response.body)) {
-      app.ports.interopToElm.send({ tag: 'streamChunk', requestId, content: delta });
+      emitChunk(delta);
     }
 
-    app.ports.interopToElm.send({ tag: 'streamDone', requestId });
+    emitEnd(null);
   } catch (error) {
     if (!controller.signal.aborted) {
-      app.ports.interopToElm.send({
-        tag: 'streamError',
-        requestId,
-        reason: error instanceof Error ? error.message : 'Stream failed',
-      });
+      emitEnd(error instanceof Error ? error.message : 'Stream failed');
     }
   } finally {
     streams.delete(requestId);
+    relays.delete(requestId);
   }
 }
 

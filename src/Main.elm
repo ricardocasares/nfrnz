@@ -6,6 +6,8 @@ import Browser.Events
 import Browser.Navigation as Nav
 import ChadCn.Badge as Badge
 import ChadCn.Button as Button
+import ChadCn.Command as Command
+import ChadCn.Dialog as Dialog
 import ChadCn.Icon as Icon
 import ChadCn.Input as Input
 import ChadCn.Message as Message
@@ -13,14 +15,16 @@ import ChadCn.Popup.Types as Popup
 import ChadCn.Select as Select
 import ChadCn.Sidebar as Sidebar
 import ChadCn.Textarea as Textarea
+import Chat exposing (Conversation)
 import Html exposing (Html, div, form, h1, header, main_, p, section, span, text)
 import Html.Attributes exposing (attribute, class, classList, id, rows, title)
-import Chat exposing (Conversation)
 import Html.Events exposing (onClick, onSubmit, preventDefaultOn)
 import Http
 import InteropDefinitions exposing (FromElm(..), ToElm(..))
 import InteropPorts
 import Json.Decode as Decode
+import Json.Encode as Encode
+import Lobby exposing (Lobby)
 import Provider exposing (Provider)
 import Task
 import Url exposing (Url)
@@ -39,12 +43,21 @@ type alias Model =
     , providers : List Provider
     , sharedModels : List String
     , nextRequestId : Int
+    , lobby : Lobby
+    , sharing : Dialog.Model
+    , sharingSearch : String
+    , sharingCommand : Command.Model
     }
 
 
 type Theme
     = Light
     | Dark
+
+
+sharedModelsStorageKey : String
+sharedModelsStorageKey =
+    "sharedModels"
 
 
 themeStorageKey : String
@@ -93,6 +106,11 @@ type Msg
     | DomFinished
     | InteropMsgReceived (Result Decode.Error ToElm)
     | ProviderModelsReceived String (Result Http.Error (List String))
+    | OpenSharing
+    | SharingMsg Dialog.Msg
+    | SharingCommandMsg Command.Msg
+    | SharingSearchChanged String
+    | ToggleShared String
 
 
 main : Program Decode.Value Model Msg
@@ -106,6 +124,7 @@ main =
             \model ->
                 Sub.batch
                     [ Select.subscriptions (modelSelectConfig model) model.current.modelSelect
+                    , Dialog.subscriptions (sharingDialogConfig model) model.sharing
                     , InteropPorts.toElm |> Sub.map InteropMsgReceived
                     , Browser.Events.onKeyDown
                         (Decode.field "key" Decode.string
@@ -147,6 +166,10 @@ init flagsValue url key =
                 |> Maybe.withDefault Light
       , providers = List.map (\configured -> { configured | status = Provider.Checking }) providers
       , sharedModels = decodeSharedModels (Maybe.andThen .sharedModels flags)
+      , lobby = Lobby.empty
+      , sharing = Dialog.init "sharing-dialog"
+      , sharingSearch = ""
+      , sharingCommand = Command.init
       }
     , detectProviders providers
     )
@@ -189,40 +212,112 @@ rememberCurrent model =
 
 sendQuestion : String -> String -> Model -> ( Model, Cmd Msg )
 sendQuestion question modelName model =
-    case Provider.serving modelName model.providers of
+    let
+        request =
+            { id = "request-" ++ String.fromInt model.nextRequestId
+            , model = modelName
+            }
+
+        asked =
+            Chat.ask request question model.current
+
+        sent =
+            case Provider.serving modelName model.providers of
+                Just provider ->
+                    Just
+                        (StreamStart
+                            { requestId = request.id
+                            , replyTo = Nothing
+                            , baseUrl = provider.baseUrl
+                            , apiKey = provider.apiKey
+                            , model = modelName
+                            , messages = Chat.turns asked
+                            }
+                        )
+
+                Nothing ->
+                    Lobby.offering modelName model.lobby
+                        |> List.head
+                        |> Maybe.map
+                            (\peerId ->
+                                AskPeer
+                                    { requestId = request.id
+                                    , peerId = peerId
+                                    , model = modelName
+                                    , messages = Chat.turns asked
+                                    }
+                            )
+    in
+    case sent of
         Nothing ->
             ( model, Cmd.none )
 
-        Just provider ->
-            let
-                request =
-                    { id = "request-" ++ String.fromInt model.nextRequestId
-                    , model = modelName
-                    }
-
-                asked =
-                    Chat.ask request question model.current
-            in
+        Just fromElm ->
             ( { model
                 | current = asked
                 , nextRequestId = model.nextRequestId + 1
                 , search = ""
               }
-            , Cmd.batch
-                [ InteropPorts.fromElm
-                    (StreamStart
-                        { requestId = request.id
-                        , replyTo = Nothing
-                        , baseUrl = provider.baseUrl
-                        , apiKey = provider.apiKey
-                        , model = modelName
-                        , messages = Chat.turns asked
-                        }
-                    )
-                , focusComposer
-                , scrollToLatest
-                ]
+            , Cmd.batch [ InteropPorts.fromElm fromElm, focusComposer, scrollToLatest ]
             )
+
+
+{-| Answers a peer asking for one of the models we share.
+-}
+servePeer : InteropDefinitions.PeerRequest -> Model -> Cmd Msg
+servePeer request model =
+    case
+        ( List.member request.model (servableModels model)
+        , Provider.serving request.model model.providers
+        )
+    of
+        ( True, Just provider ) ->
+            InteropPorts.fromElm
+                (StreamStart
+                    { requestId = request.requestId
+                    , replyTo = Just request.peerId
+                    , baseUrl = provider.baseUrl
+                    , apiKey = provider.apiKey
+                    , model = request.model
+                    , messages = List.take inboundTurnLimit request.messages
+                    }
+                )
+
+        _ ->
+            InteropPorts.fromElm
+                (RejectPeer request.requestId request.peerId "That model is not shared")
+
+
+{-| Caps how much conversation a peer can push through our provider at once.
+-}
+inboundTurnLimit : Int
+inboundTurnLimit =
+    50
+
+
+{-| Returns the shared models we can actually serve right now.
+-}
+servableModels : Model -> List String
+servableModels model =
+    List.filter
+        (\name -> Provider.serving name model.providers /= Nothing)
+        model.sharedModels
+
+
+{-| Tells the lobby what we serve, and remembers what the user chose.
+-}
+shareModels : Model -> Cmd Msg
+shareModels model =
+    Cmd.batch
+        [ InteropPorts.fromElm (ShareModels (servableModels model))
+        , InteropPorts.fromElm
+            (StorageSet sharedModelsStorageKey (encodeStrings model.sharedModels))
+        ]
+
+
+encodeStrings : List String -> String
+encodeStrings values =
+    Encode.encode 0 (Encode.list Encode.string values)
 
 
 cancelRequest : Conversation -> Cmd Msg
@@ -357,8 +452,58 @@ update msg model =
         InteropMsgReceived (Ok (StreamError requestId reason)) ->
             ( { model | current = Chat.failReply requestId reason current }, scrollToLatest )
 
+        InteropMsgReceived (Ok (PeerJoined peerId)) ->
+            ( { model | lobby = Lobby.joined peerId model.lobby }, Cmd.none )
+
+        InteropMsgReceived (Ok (PeerLeft peerId)) ->
+            ( { model | lobby = Lobby.left peerId model.lobby }, Cmd.none )
+
+        InteropMsgReceived (Ok (PeerModelsUpdated peerId shared)) ->
+            ( { model | lobby = Lobby.offers peerId shared model.lobby }, Cmd.none )
+
+        InteropMsgReceived (Ok (PeerAsked request)) ->
+            ( model, servePeer request model )
+
         InteropMsgReceived (Err _) ->
             ( model, Cmd.none )
+
+        OpenSharing ->
+            let
+                ( sharing, cmd ) =
+                    Dialog.open (sharingDialogConfig model) model.sharing
+            in
+            ( { model | sharing = sharing, sharingSearch = "" }, cmd )
+
+        SharingMsg dialogMsg ->
+            let
+                ( sharing, cmd ) =
+                    Dialog.update (sharingDialogConfig model) dialogMsg model.sharing
+            in
+            ( { model | sharing = sharing }, cmd )
+
+        SharingCommandMsg commandMsg ->
+            let
+                ( sharingCommand, cmd ) =
+                    Command.update (sharingCommandConfig model) commandMsg model.sharingCommand
+            in
+            ( { model | sharingCommand = sharingCommand }, cmd )
+
+        SharingSearchChanged query ->
+            ( { model | sharingSearch = query }, Cmd.none )
+
+        ToggleShared name ->
+            let
+                sharedModels =
+                    if List.member name model.sharedModels then
+                        List.filter ((/=) name) model.sharedModels
+
+                    else
+                        model.sharedModels ++ [ name ]
+
+                shared =
+                    { model | sharedModels = sharedModels }
+            in
+            ( shared, shareModels shared )
 
         ProviderModelsReceived providerId result ->
             let
@@ -369,8 +514,11 @@ update msg model =
 
                         Err error ->
                             Provider.Unavailable (Provider.errorToString error)
+
+                detected =
+                    { model | providers = Provider.setStatus providerId status model.providers }
             in
-            ( { model | providers = Provider.setStatus providerId status model.providers }, Cmd.none )
+            ( detected, InteropPorts.fromElm (ShareModels (servableModels detected)) )
 
 
 view : Model -> Browser.Document Msg
@@ -388,6 +536,7 @@ view model =
             , classList [ ( "dark", model.theme == Dark ) ]
             ]
             [ viewSidebar model
+            , viewSharingDialog model
             , Button.new []
                 |> Button.withVariant Button.Ghost
                 |> Button.withOnClick CloseMobileSidebar
@@ -504,13 +653,28 @@ viewSidebar model =
             |> Sidebar.addGroup historyGroup
             |> Sidebar.withFooter
                 (div []
-                    [ div [ class """
-                    flex items-start gap-2.5 px-[9px] pt-[15px] pb-[22px] text-xs leading-[1.6] text-muted-foreground
+                    [ Sidebar.newMenuButton
+                        [ Icon.render Icon.Share
+                        , span [ class "md:group-data-[state=collapsed]/sidebar:hidden" ] [ text "Share models" ]
+                        ]
+                        |> Sidebar.withMenuButtonAttributes
+                            [ onClick OpenSharing
+                            , id "share-models"
+                            , class "mb-3 h-[37px]! gap-[11px]! rounded-[9px]! px-3! font-medium md:group-data-[state=collapsed]/sidebar:size-9! md:group-data-[state=collapsed]/sidebar:p-2!"
+                            , attribute "aria-label" "Share models"
+                            ]
+                        |> Sidebar.withMenuButtonTooltip "share-models-tooltip" "Share models"
+                        |> Sidebar.viewMenuButton
+                    , div [ class """
+                    flex items-start gap-2.5 px-[9px] pt-[6px] pb-[22px] text-xs leading-[1.6] text-muted-foreground
                     md:group-data-[state=collapsed]/sidebar:hidden [&_svg]:mt-0.5 [&_svg]:size-4 [&_svg]:flex-none [&_p]:m-0 [&_span]:block
                     [&_span]:text-[11px] [&_span]:opacity-80
                     """ ]
                         [ Icon.render Icon.MessageCircle
-                        , p [] [ text "A space for your ideas.", span [] [ text "Chats stay in this session." ] ]
+                        , p []
+                            [ text (lobbySummary model)
+                            , span [] [ text (sharingSummary model) ]
+                            ]
                         ]
                     , div [ class "flex items-center gap-2.5 border-t border-sidebar-border px-1 pt-[19px] pb-px md:group-data-[state=collapsed]/sidebar:justify-center md:group-data-[state=collapsed]/sidebar:px-0" ]
                         [ div [ class "grid size-[33px] flex-none place-items-center rounded-full bg-[#e6e8df] text-xs leading-[1.5] font-semibold text-[#646957]" ] [ text "N" ]
@@ -565,6 +729,75 @@ viewHeader model =
                     iconButton "Switch to light theme" Icon.Sun ToggleTheme
             ]
         ]
+
+
+lobbySummary : Model -> String
+lobbySummary model =
+    case Lobby.peerCount model.lobby of
+        0 ->
+            "Looking for peers…"
+
+        peers ->
+            pluralize "peer" (List.repeat peers ()) ++ " in the lobby"
+
+
+sharingSummary : Model -> String
+sharingSummary model =
+    case servableModels model of
+        [] ->
+            "You share nothing yet."
+
+        shared ->
+            "You share " ++ pluralize "model" shared ++ "."
+
+
+sharingDialogConfig : Model -> Dialog.Config Msg
+sharingDialogConfig _ =
+    Dialog.new SharingMsg [ text "Share your models" ]
+        |> Dialog.withDescription
+            [ text "Anyone in the lobby can chat with the models you tick here." ]
+        |> Dialog.withRestoreFocusId "share-models"
+
+
+sharingCommandConfig : Model -> Command.Config Msg
+sharingCommandConfig model =
+    let
+        local =
+            Provider.localModels model.providers
+                |> List.filter
+                    (\name ->
+                        String.contains
+                            (String.toLower model.sharingSearch)
+                            (String.toLower name)
+                    )
+    in
+    Command.new "share-models-command" SharingCommandMsg SharingSearchChanged
+        |> Command.withInputPlaceholder "Search your models"
+        |> Command.withInputValue model.sharingSearch
+        |> Command.withContent
+            (if List.isEmpty local then
+                [ Command.empty [] [ text "No local models to share" ] ]
+
+             else
+                [ Command.group []
+                    [ text "Your models" ]
+                    (List.map
+                        (\name ->
+                            Command.newItem name name (ToggleShared name) [ text name ]
+                                |> Command.withItemChecked (List.member name model.sharedModels)
+                        )
+                        local
+                    )
+                ]
+            )
+
+
+viewSharingDialog : Model -> Html Msg
+viewSharingDialog model =
+    Command.dialog model.sharing
+        (sharingDialogConfig model)
+        model.sharingCommand
+        (sharingCommandConfig model)
 
 
 viewProviderBadge : List Provider -> Html Msg
@@ -650,11 +883,64 @@ suggestion icon label description prompt =
         |> Button.view
 
 
+{-| Describes one model the user can talk to, and where it runs.
+-}
+type alias Available =
+    { name : String
+    , local : Bool
+    , peers : Int
+    }
+
+
+{-| Merges local models with everything the lobby offers.
+-}
+availableModels : Model -> List Available
+availableModels model =
+    let
+        local =
+            Provider.localModels model.providers
+
+        shared =
+            Lobby.models model.lobby
+
+        fromPeers =
+            List.map
+                (\offer ->
+                    { name = offer.model
+                    , local = List.member offer.model local
+                    , peers = List.length offer.peers
+                    }
+                )
+                shared
+
+        onlyLocal =
+            local
+                |> List.filter (\name -> not (List.any (\offer -> offer.model == name) shared))
+                |> List.map (\name -> { name = name, local = True, peers = 0 })
+    in
+    List.sortBy .name (fromPeers ++ onlyLocal)
+
+
+{-| Describes where a model runs, for the picker.
+-}
+availableLabel : Available -> String
+availableLabel available =
+    case ( available.local, available.peers ) of
+        ( True, 0 ) ->
+            "local"
+
+        ( True, peers ) ->
+            "local + " ++ pluralize "peer" (List.repeat peers ())
+
+        ( False, peers ) ->
+            pluralize "peer" (List.repeat peers ())
+
+
 modelSelectConfig : Model -> Select.Config Msg
 modelSelectConfig model =
     let
         available =
-            Provider.localModels model.providers
+            availableModels model
     in
     Select.new ModelSelectMsg (\_ -> DomFinished)
         |> Select.withAriaLabel "Select model"
@@ -672,9 +958,14 @@ modelSelectConfig model =
         |> Select.withContent
             (Select.label [] [ text "Available models" ]
                 :: List.map
-                    (\name ->
-                        Select.newItem name name
-                            |> Select.withItemContent [ Icon.render Icon.Zap, text name ]
+                    (\model_ ->
+                        Select.newItem model_.name model_.name
+                            |> Select.withItemContent
+                                [ Icon.render Icon.Zap
+                                , text model_.name
+                                , span [ class "ml-auto pl-3 text-[10px] text-muted-foreground" ]
+                                    [ text (availableLabel model_) ]
+                                ]
                             |> Select.item
                     )
                     available

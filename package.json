@@ -21,5 +21,8 @@
     "vite": "^7.0.0",
     "vite-plugin-elm": "^3.0.1",
     "vite-plugin-elm-watch": "^2.0.0"
+  },
+  "dependencies": {
+    "@trystero-p2p/nostr": "^0.25.4"
   }
 }
