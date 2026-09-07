@@ -15,10 +15,13 @@ import ChadCn.Sidebar as Sidebar
 import ChadCn.Textarea as Textarea
 import Html exposing (Html, div, form, h1, header, main_, p, section, span, text)
 import Html.Attributes exposing (attribute, class, classList, id, rows, title)
+import Chat exposing (Conversation)
 import Html.Events exposing (onClick, onSubmit, preventDefaultOn)
+import Http
 import InteropDefinitions exposing (FromElm(..), ToElm(..))
 import InteropPorts
 import Json.Decode as Decode
+import Provider exposing (Provider)
 import Task
 import Url exposing (Url)
 
@@ -33,14 +36,9 @@ type alias Model =
     , mobileSidebar : Bool
     , search : String
     , theme : Theme
-    }
-
-
-type alias Conversation =
-    { id : Int
-    , messages : List String
-    , draft : String
-    , modelSelect : Select.Model
+    , providers : List Provider
+    , sharedModels : List String
+    , nextRequestId : Int
     }
 
 
@@ -94,6 +92,7 @@ type Msg
     | ToggleTheme
     | DomFinished
     | InteropMsgReceived (Result Decode.Error ToElm)
+    | ProviderModelsReceived String (Result Http.Error (List String))
 
 
 main : Program Decode.Value Model Msg
@@ -106,7 +105,7 @@ main =
         , subscriptions =
             \model ->
                 Sub.batch
-                    [ Select.subscriptions modelSelectConfig model.current.modelSelect
+                    [ Select.subscriptions (modelSelectConfig model) model.current.modelSelect
                     , InteropPorts.toElm |> Sub.map InteropMsgReceived
                     , Browser.Events.onKeyDown
                         (Decode.field "key" Decode.string
@@ -127,36 +126,44 @@ main =
 init : Decode.Value -> Url -> Nav.Key -> ( Model, Cmd Msg )
 init flagsValue url key =
     let
-        theme =
-            InteropPorts.decodeFlags flagsValue
-                |> Result.toMaybe
-                |> Maybe.andThen (\flags -> themeFromString flags.theme)
-                |> Maybe.withDefault Light
+        flags =
+            InteropPorts.decodeFlags flagsValue |> Result.toMaybe
+
+        providers =
+            Provider.restore (Maybe.andThen .providers flags)
     in
-    ( initialModel url key theme, Cmd.none )
+    ( { key = key
+      , url = url
+      , current = Chat.empty 0
+      , history = []
+      , nextId = 1
+      , nextRequestId = 0
+      , sidebar = Sidebar.Expanded
+      , mobileSidebar = False
+      , search = ""
+      , theme =
+            flags
+                |> Maybe.andThen (.theme >> themeFromString)
+                |> Maybe.withDefault Light
+      , providers = List.map (\configured -> { configured | status = Provider.Checking }) providers
+      , sharedModels = decodeSharedModels (Maybe.andThen .sharedModels flags)
+      }
+    , detectProviders providers
+    )
 
 
-initialModel : Url -> Nav.Key -> Theme -> Model
-initialModel url key theme =
-    { key = key
-    , url = url
-    , current = emptyConversation 0
-    , history = []
-    , nextId = 1
-    , sidebar = Sidebar.Expanded
-    , mobileSidebar = False
-    , search = ""
-    , theme = theme
-    }
+detectProviders : List Provider -> Cmd Msg
+detectProviders providers =
+    providers
+        |> List.map (Provider.listModels ProviderModelsReceived)
+        |> Cmd.batch
 
 
-emptyConversation : Int -> Conversation
-emptyConversation conversationId =
-    { id = conversationId
-    , messages = []
-    , draft = ""
-    , modelSelect = Select.init "model-select" (Just "preview-balanced")
-    }
+decodeSharedModels : Maybe String -> List String
+decodeSharedModels stored =
+    stored
+        |> Maybe.andThen (Decode.decodeString (Decode.list Decode.string) >> Result.toMaybe)
+        |> Maybe.withDefault []
 
 
 focusComposer : Cmd Msg
@@ -173,15 +180,56 @@ scrollToLatest =
 
 rememberCurrent : Model -> List Conversation
 rememberCurrent model =
-    if List.isEmpty model.current.messages then
+    if Chat.isEmpty model.current then
         model.history
 
     else
-        let
-            current =
-                model.current
-        in
-        { current | modelSelect = Select.init "model-select" (Select.selected current.modelSelect) } :: model.history
+        Chat.reset model.current :: model.history
+
+
+sendQuestion : String -> String -> Model -> ( Model, Cmd Msg )
+sendQuestion question modelName model =
+    case Provider.serving modelName model.providers of
+        Nothing ->
+            ( model, Cmd.none )
+
+        Just provider ->
+            let
+                request =
+                    { id = "request-" ++ String.fromInt model.nextRequestId
+                    , model = modelName
+                    }
+
+                asked =
+                    Chat.ask request question model.current
+            in
+            ( { model
+                | current = asked
+                , nextRequestId = model.nextRequestId + 1
+                , search = ""
+              }
+            , Cmd.batch
+                [ InteropPorts.fromElm
+                    (StreamStart
+                        { requestId = request.id
+                        , replyTo = Nothing
+                        , baseUrl = provider.baseUrl
+                        , apiKey = provider.apiKey
+                        , model = modelName
+                        , messages = Chat.turns asked
+                        }
+                    )
+                , focusComposer
+                , scrollToLatest
+                ]
+            )
+
+
+cancelRequest : Conversation -> Cmd Msg
+cancelRequest conversation =
+    conversation.request
+        |> Maybe.map (\request -> InteropPorts.fromElm (StreamCancel request.id))
+        |> Maybe.withDefault Cmd.none
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
@@ -208,30 +256,28 @@ update msg model =
         ModelSelectMsg selectMsg ->
             let
                 ( modelSelect, cmd ) =
-                    Select.update modelSelectConfig selectMsg current.modelSelect
+                    Select.update (modelSelectConfig model) selectMsg current.modelSelect
             in
             ( { model | current = { current | modelSelect = modelSelect } }, cmd )
 
         SendMessage ->
-            case String.trim current.draft of
-                "" ->
+            case ( String.trim current.draft, Chat.selectedModel current ) of
+                ( "", _ ) ->
                     ( model, Cmd.none )
 
-                content ->
-                    ( { model
-                        | current = { current | messages = current.messages ++ [ content ], draft = "" }
-                        , search = ""
-                      }
-                    , Cmd.batch [ focusComposer, scrollToLatest ]
-                    )
+                ( _, Nothing ) ->
+                    ( model, Cmd.none )
+
+                ( question, Just modelName ) ->
+                    sendQuestion question modelName model
 
         NewChat ->
-            if List.isEmpty current.messages then
+            if Chat.isEmpty current then
                 ( { model | mobileSidebar = False, search = "" }, focusComposer )
 
             else
                 ( { model
-                    | current = emptyConversation model.nextId
+                    | current = Chat.empty model.nextId
                     , history = rememberCurrent model
                     , nextId = model.nextId + 1
                     , mobileSidebar = False
@@ -255,7 +301,9 @@ update msg model =
                     ( { model | mobileSidebar = False }, focusComposer )
 
         DeleteCurrentChat ->
-            ( { model | current = emptyConversation model.nextId, nextId = model.nextId + 1 }, focusComposer )
+            ( { model | current = Chat.empty model.nextId, nextId = model.nextId + 1 }
+            , Cmd.batch [ cancelRequest current, focusComposer ]
+            )
 
         SearchChanged query ->
             ( { model | search = query }, Cmd.none )
@@ -300,18 +348,34 @@ update msg model =
         InteropMsgReceived (Ok (StorageValue _ _)) ->
             ( model, Cmd.none )
 
+        InteropMsgReceived (Ok (StreamChunk requestId chunk)) ->
+            ( { model | current = Chat.appendChunk requestId chunk current }, scrollToLatest )
+
+        InteropMsgReceived (Ok (StreamDone requestId)) ->
+            ( { model | current = Chat.finishReply requestId current }, scrollToLatest )
+
+        InteropMsgReceived (Ok (StreamError requestId reason)) ->
+            ( { model | current = Chat.failReply requestId reason current }, scrollToLatest )
+
         InteropMsgReceived (Err _) ->
             ( model, Cmd.none )
 
+        ProviderModelsReceived providerId result ->
+            let
+                status =
+                    case result of
+                        Ok models ->
+                            Provider.Available models
 
-conversationTitle : Conversation -> String
-conversationTitle conversation =
-    List.head conversation.messages |> Maybe.withDefault "New chat"
+                        Err error ->
+                            Provider.Unavailable (Provider.errorToString error)
+            in
+            ( { model | providers = Provider.setStatus providerId status model.providers }, Cmd.none )
 
 
 view : Model -> Browser.Document Msg
 view model =
-    { title = conversationTitle model.current ++ " · nfrnz"
+    { title = Chat.title model.current ++ " · nfrnz"
     , body =
         [ div
             [ class """
@@ -331,18 +395,18 @@ view model =
                 |> Button.view
             , main_ [ class "flex min-w-0 flex-1 flex-col" ]
                 [ viewHeader model
-                , div [ id "chat-scroll", class "min-h-0 flex-1 overflow-y-auto overscroll-contain [scrollbar-width:thin]", classList [ ( "flex", List.isEmpty model.current.messages ) ] ]
-                    [ if List.isEmpty model.current.messages then
+                , div [ id "chat-scroll", class "min-h-0 flex-1 overflow-y-auto overscroll-contain [scrollbar-width:thin]", classList [ ( "flex", Chat.isEmpty model.current ) ] ]
+                    [ if Chat.isEmpty model.current then
                         viewWelcome model
 
                       else
                         viewConversation model.current
                     ]
-                , if List.isEmpty model.current.messages then
+                , if Chat.isEmpty model.current then
                     text ""
 
                   else
-                    div [ class "mx-auto w-full max-w-[800px] flex-none px-8 pt-3 md:max-[1051px]:px-[26px] max-md:px-3.5 max-md:pt-2.5" ] [ viewComposer model.current ]
+                    div [ class "mx-auto w-full max-w-[800px] flex-none px-8 pt-3 md:max-[1051px]:px-[26px] max-md:px-3.5 max-md:pt-2.5" ] [ viewComposer model ]
                 , p [ class "m-0 flex-none px-4 pt-3.5 pb-5 text-center text-[10px] tracking-[.15px] text-muted-foreground max-md:pb-[max(14px,env(safe-area-inset-bottom))]" ] [ text "A little curiosity goes a long way." ]
                 ]
             ]
@@ -359,13 +423,13 @@ viewSidebar model =
                 |> List.filter
                     (\chat ->
                         String.contains (String.toLower model.search)
-                            (String.toLower (String.join " " chat.messages))
+                            (String.toLower (Chat.searchText chat))
                     )
 
         historyGroup =
             List.foldl
                 (\conversation group ->
-                    Sidebar.newItem (conversationTitle conversation) (SelectChat conversation.id)
+                    Sidebar.newItem (Chat.title conversation) (SelectChat conversation.id)
                         |> Sidebar.withItemIcon (Icon.render Icon.MessageSquare)
                         |> Sidebar.withItemActive (conversation.id == model.current.id)
                         |> (\item -> Sidebar.addConfiguredItem item group)
@@ -484,14 +548,11 @@ viewHeader model =
                 ]
             , span [ class "text-base font-semibold tracking-[-.5px]" ] [ text "nfrnz" ]
             , span [ class "text-xl leading-[1.5] font-light text-border max-md:hidden" ] [ text "/" ]
-            , span [ class "max-w-60 truncate text-[13px] text-muted-foreground max-md:hidden" ] [ text (conversationTitle model.current) ]
+            , span [ class "max-w-60 truncate text-[13px] text-muted-foreground max-md:hidden" ] [ text (Chat.title model.current) ]
             ]
         , div [ class "flex min-w-0 flex-none items-center gap-2.5 text-muted-foreground max-md:gap-[3px]" ]
-            [ Badge.new [ span [ class "size-[5px] rounded-full bg-[#b2b4a9]" ] [], text "No model connected" ]
-                |> Badge.withVariant Badge.Outline
-                |> Badge.withAttributes [ class "gap-[7px]! rounded-[6px]! border-border! px-[9px]! py-[5px]! text-[10px]! leading-[1.6]! font-normal! text-muted-foreground! max-md:gap-[5px]! max-md:px-1.5! max-md:py-1! max-md:text-[9px]!" ]
-                |> Badge.view
-            , if List.isEmpty model.current.messages then
+            [ viewProviderBadge model.providers
+            , if Chat.isEmpty model.current then
                 text ""
 
               else
@@ -504,6 +565,43 @@ viewHeader model =
                     iconButton "Switch to light theme" Icon.Sun ToggleTheme
             ]
         ]
+
+
+viewProviderBadge : List Provider -> Html Msg
+viewProviderBadge providers =
+    let
+        available =
+            List.filter (\configured -> not (List.isEmpty (Provider.models configured))) providers
+
+        ( dot, label ) =
+            if List.any (\configured -> configured.status == Provider.Checking) providers then
+                ( "bg-[#b2b4a9]", "Detecting providers…" )
+
+            else
+                case available of
+                    [] ->
+                        ( "bg-[#b2b4a9]", "No provider detected" )
+
+                    [ only ] ->
+                        ( "bg-[#7f9a6b]", only.label ++ " · " ++ pluralize "model" (Provider.localModels available) )
+
+                    _ ->
+                        ( "bg-[#7f9a6b]", pluralize "provider" available ++ " · " ++ pluralize "model" (Provider.localModels available) )
+    in
+    Badge.new [ span [ class ("size-[5px] rounded-full " ++ dot) ] [], text label ]
+        |> Badge.withVariant Badge.Outline
+        |> Badge.withAttributes [ class "gap-[7px]! rounded-[6px]! border-border! px-[9px]! py-[5px]! text-[10px]! leading-[1.6]! font-normal! text-muted-foreground! max-md:gap-[5px]! max-md:px-1.5! max-md:py-1! max-md:text-[9px]!" ]
+        |> Badge.view
+
+
+pluralize : String -> List a -> String
+pluralize noun values =
+    case values of
+        [ _ ] ->
+            "1 " ++ noun
+
+        _ ->
+            String.fromInt (List.length values) ++ " " ++ noun ++ "s"
 
 
 iconButton : String -> Icon.Icon -> Msg -> Html Msg
@@ -525,7 +623,7 @@ viewWelcome model =
             , h1 [ class "m-0 mb-3.5 text-[clamp(27px,3.2vw,37px)] leading-[1.2] font-medium tracking-[-1.25px]" ] [ text "Where should we start?" ]
             , p [ class "m-0 text-[13px] leading-[1.8] text-muted-foreground max-md:mx-auto max-md:max-w-[260px]" ] [ text "Ask a question, explore a thought, or make something great." ]
             ]
-        , viewComposer model.current
+        , viewComposer model
         , div [ class "mt-[34px] grid grid-cols-4 gap-3 md:max-[1051px]:gap-2 max-md:mt-6 max-md:grid-cols-2 max-md:gap-[9px]", attribute "aria-label" "Suggested prompts" ]
             [ suggestion Icon.Pencil "Write something" "Find the right words" "Help me write a clear, thoughtful message about "
             , suggestion Icon.Code "Build an idea" "From what if to what's next" "Help me turn this idea into a plan: "
@@ -552,30 +650,51 @@ suggestion icon label description prompt =
         |> Button.view
 
 
-modelSelectConfig : Select.Config Msg
-modelSelectConfig =
+modelSelectConfig : Model -> Select.Config Msg
+modelSelectConfig model =
+    let
+        available =
+            Provider.localModels model.providers
+    in
     Select.new ModelSelectMsg (\_ -> DomFinished)
         |> Select.withAriaLabel "Select model"
         |> Select.withAlign Popup.End
+        |> Select.withDisabled (List.isEmpty available)
+        |> Select.withPlaceholder
+            (if List.isEmpty available then
+                "No models"
+
+             else
+                "Select model"
+            )
         |> Select.withTriggerAttributes [ attribute "aria-describedby" "composer-hint" ]
         |> Select.withContentAttributes [ class "p-2" ]
         |> Select.withContent
-            (Select.label [] [ text "Select model" ]
+            (Select.label [] [ text "Available models" ]
                 :: List.map
-                    (\( modelId, label ) ->
-                        Select.newItem modelId label
-                            |> Select.withItemContent [ Icon.render Icon.Zap, text label ]
+                    (\name ->
+                        Select.newItem name name
+                            |> Select.withItemContent [ Icon.render Icon.Zap, text name ]
                             |> Select.item
                     )
-                    [ ( "preview-balanced", "Balanced" )
-                    , ( "preview-fast", "Fast" )
-                    , ( "preview-reasoning", "Reasoning" )
-                    ]
+                    available
             )
 
 
-viewComposer : Conversation -> Html Msg
-viewComposer conversation =
+viewComposer : Model -> Html Msg
+viewComposer model =
+    let
+        conversation =
+            model.current
+
+        streaming =
+            conversation.request /= Nothing
+
+        sendable =
+            not streaming
+                && not (String.isEmpty (String.trim conversation.draft))
+                && Chat.selectedModel conversation /= Nothing
+    in
     div []
         [ form [ class """
                     rounded-[19px] border border-border bg-background px-[13px] pt-[9px] pb-3
@@ -591,17 +710,17 @@ viewComposer conversation =
                 |> Textarea.view
             , div [ class "flex items-center justify-between gap-2 pl-1.5" ]
                 [ div [ class "ml-auto min-w-0" ]
-                    [ Select.view conversation.modelSelect modelSelectConfig ]
+                    [ Select.view conversation.modelSelect (modelSelectConfig model) ]
                 , Button.new [ Icon.render Icon.ArrowUp ]
                     |> Button.withType Button.Submit
                     |> Button.withSize Button.Icon
-                    |> Button.withDisabled (String.isEmpty (String.trim conversation.draft))
+                    |> Button.withDisabled (not sendable)
                     |> Button.withAttributes [ attribute "aria-label" "Send message", title "Send message" ]
                     |> Button.view
                 ]
             ]
         , p [ id "composer-hint", class "m-0 mt-[11px] flex justify-between gap-3 px-1 text-[10px] leading-[1.5] text-muted-foreground max-md:text-[9px] max-md:[&>span]:hidden" ]
-            [ text "Interface preview · No AI responses yet"
+            [ text (composerHint model)
             , span [] [ text "Shift + Enter for a new line" ]
             ]
         ]
@@ -630,28 +749,73 @@ viewConversation : Conversation -> Html Msg
 viewConversation conversation =
     section [ class "mx-auto w-full max-w-[800px] px-8 pt-[25px] pb-10 md:max-[1051px]:px-[26px] max-md:p-5", attribute "aria-label" "Conversation" ]
         [ div [ class "m-0 mb-9 text-center text-[9px] tracking-[1.5px] text-muted-foreground" ] [ text "THE START OF SOMETHING" ]
-        , Message.group [ class "gap-[27px]! [&_[data-slot=message-content]]:items-end", attribute "role" "log", attribute "aria-live" "polite", attribute "aria-relevant" "additions" ]
-            (List.map
-                (\content ->
-                    Message.new
-                        [ Message.content []
-                            [ Message.header [] [ text "You" ]
-                            , div [ class "max-w-[85%] rounded-[19px_19px_5px_19px] bg-accent px-[19px] py-[13px] text-sm leading-[1.8] whitespace-pre-wrap text-foreground [overflow-wrap:anywhere]" ] [ text content ]
-                            ]
-                        ]
-                        |> Message.withAlignment Message.End
-                        |> Message.view
-                )
-                conversation.messages
-            )
-        , Message.new
-            [ brandMark
-            , Message.content []
-                [ Message.header [ class "p-0! text-[13px]! text-foreground!" ] [ text "nfrnz" ]
-                , p [ class "m-0 max-w-[560px] text-sm leading-[1.9] text-muted-foreground", attribute "role" "status" ]
-                    [ text "Your conversation is ready. Once an inference provider is connected, AI responses will appear here." ]
-                ]
-            ]
-            |> Message.withAttributes [ class "mt-[30px] gap-3!" ]
-            |> Message.view
+        , Message.group [ class "gap-[27px]!", attribute "role" "log", attribute "aria-live" "polite", attribute "aria-relevant" "additions" ]
+            (List.map viewMessage conversation.messages)
         ]
+
+
+viewMessage : Chat.Message -> Html Msg
+viewMessage message =
+    case message of
+        Chat.Asked question ->
+            Message.new
+                [ Message.content [ class "items-end" ]
+                    [ Message.header [] [ text "You" ]
+                    , div [ class "max-w-[85%] rounded-[19px_19px_5px_19px] bg-accent px-[19px] py-[13px] text-sm leading-[1.8] whitespace-pre-wrap text-foreground [overflow-wrap:anywhere]" ] [ text question ]
+                    ]
+                ]
+                |> Message.withAlignment Message.End
+                |> Message.view
+
+        Chat.Replied reply state ->
+            Message.new
+                [ brandMark
+                , Message.content []
+                    [ Message.header [ class "p-0! text-[13px]! text-foreground!" ] [ text "nfrnz" ]
+                    , viewReply reply state
+                    ]
+                ]
+                |> Message.withAttributes [ class "gap-3!" ]
+                |> Message.view
+
+
+viewReply : String -> Chat.ReplyState -> Html Msg
+viewReply reply state =
+    case state of
+        Chat.Failed reason ->
+            p [ class "m-0 max-w-[560px] text-sm leading-[1.9] text-destructive", attribute "role" "status" ]
+                [ text reason ]
+
+        Chat.Streaming ->
+            if String.isEmpty (String.trim reply) then
+                p [ class "m-0 max-w-[560px] text-sm leading-[1.9] text-muted-foreground", attribute "role" "status" ]
+                    [ text "Thinking…" ]
+
+            else
+                replyText reply
+
+        Chat.Complete ->
+            replyText reply
+
+
+replyText : String -> Html Msg
+replyText reply =
+    p [ class "m-0 max-w-[640px] text-sm leading-[1.9] whitespace-pre-wrap text-foreground [overflow-wrap:anywhere]" ]
+        [ text reply ]
+
+
+composerHint : Model -> String
+composerHint model =
+    if model.current.request /= Nothing then
+        "Generating…"
+
+    else if List.isEmpty (Provider.localModels model.providers) then
+        "No models detected · check your provider"
+
+    else
+        case Chat.selectedModel model.current of
+            Just name ->
+                "Talking to " ++ name
+
+            Nothing ->
+                "Pick a model to start"
