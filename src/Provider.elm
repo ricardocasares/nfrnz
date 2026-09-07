@@ -1,6 +1,6 @@
 module Provider exposing
     ( Provider, Status(..)
-    , defaults, restore, encodeAll
+    , defaults, custom, restore, encodeAll
     , listModels, setStatus, errorToString
     , models, localModels, serving
     )
@@ -12,7 +12,7 @@ Ollama, LM Studio and llama.cpp all expose `GET /v1/models` and
 endpoint the user configures by hand.
 
 @docs Provider, Status
-@docs defaults, restore, encodeAll
+@docs defaults, custom, restore, encodeAll
 @docs listModels, setStatus, errorToString
 @docs models, localModels, serving
 
@@ -51,6 +51,16 @@ defaults =
     , provider "lmstudio" "LM Studio" "http://localhost:1234"
     , provider "llamacpp" "llama.cpp" "http://localhost:8080"
     ]
+
+
+{-| Creates an empty provider for the user to fill in.
+-}
+custom : Int -> Provider
+custom number =
+    provider
+        ("custom-" ++ String.fromInt number)
+        "Custom provider"
+        "http://localhost:8000"
 
 
 {-| Creates an unchecked provider without credentials.

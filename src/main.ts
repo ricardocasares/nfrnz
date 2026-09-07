@@ -5,6 +5,7 @@ import type { FromElm } from './Main.elm';
 
 type StreamRequest = Extract<FromElm, { tag: 'streamStart' }>['data'];
 type PeerRequest = Extract<FromElm, { tag: 'askPeer' }>['data'];
+type PeerTurn = { role: string; content: string };
 type PeerChunk = { requestId: string; content: string };
 type PeerEnd = { requestId: string; reason: string | null };
 
@@ -57,16 +58,38 @@ room.onPeerLeave = (peerId) => {
 };
 
 models.onMessage = (shares, { peerId }) => {
+  app.ports.interopToElm.send({ tag: 'peerModelsUpdated', peerId, models: asStrings(shares) });
+};
+
+/** Reads a list of names off the wire, where arrays arrive keyed by index. */
+function asStrings(value: unknown): string[] {
+  const values = Array.isArray(value) ? value : Object.values(value ?? {});
+  return values.filter((entry): entry is string => typeof entry === 'string');
+}
+
+ask.onMessage = (request, { peerId }) => {
   app.ports.interopToElm.send({
-    tag: 'peerModelsUpdated',
+    tag: 'peerAsked',
     peerId,
-    models: Array.isArray(shares) ? shares.filter((model) => typeof model === 'string') : [],
+    requestId: String(request?.requestId ?? ''),
+    model: String(request?.model ?? ''),
+    messages: asTurns(request?.messages),
   });
 };
 
-ask.onMessage = (request, { peerId }) => {
-  app.ports.interopToElm.send({ tag: 'peerAsked', ...request, peerId });
-};
+/** Reads the turns a peer sent, keeping only well-formed ones. */
+function asTurns(value: unknown): { role: string; content: string }[] {
+  const values = Array.isArray(value) ? value : Object.values(value ?? {});
+
+  return values.flatMap((entry) =>
+    entry !== null &&
+    typeof entry === 'object' &&
+    typeof (entry as PeerTurn).role === 'string' &&
+    typeof (entry as PeerTurn).content === 'string'
+      ? [{ role: (entry as PeerTurn).role, content: (entry as PeerTurn).content }]
+      : [],
+  );
+}
 
 chunks.onMessage = (chunk, { peerId }) => {
   if (asked.get(chunk.requestId) !== peerId) return;

@@ -47,12 +47,19 @@ type alias Model =
     , sharing : Dialog.Model
     , sharingSearch : String
     , sharingCommand : Command.Model
+    , config : Dialog.Model
+    , nextProviderId : Int
     }
 
 
 type Theme
     = Light
     | Dark
+
+
+providersStorageKey : String
+providersStorageKey =
+    "providers"
 
 
 sharedModelsStorageKey : String
@@ -111,6 +118,14 @@ type Msg
     | SharingCommandMsg Command.Msg
     | SharingSearchChanged String
     | ToggleShared String
+    | OpenConfig
+    | ConfigMsg Dialog.Msg
+    | ProviderLabelChanged String String
+    | ProviderUrlChanged String String
+    | ProviderKeyChanged String String
+    | AddProvider
+    | RemoveProvider String
+    | ScanProviders
 
 
 main : Program Decode.Value Model Msg
@@ -125,6 +140,7 @@ main =
                 Sub.batch
                     [ Select.subscriptions (modelSelectConfig model) model.current.modelSelect
                     , Dialog.subscriptions (sharingDialogConfig model) model.sharing
+                    , Dialog.subscriptions (configDialogConfig model) model.config
                     , InteropPorts.toElm |> Sub.map InteropMsgReceived
                     , Browser.Events.onKeyDown
                         (Decode.field "key" Decode.string
@@ -170,6 +186,8 @@ init flagsValue url key =
       , sharing = Dialog.init "sharing-dialog"
       , sharingSearch = ""
       , sharingCommand = Command.init
+      , config = Dialog.init "config-dialog"
+      , nextProviderId = 0
       }
     , detectProviders providers
     )
@@ -313,6 +331,34 @@ shareModels model =
         , InteropPorts.fromElm
             (StorageSet sharedModelsStorageKey (encodeStrings model.sharedModels))
         ]
+
+
+{-| Applies one change to a single configured provider.
+-}
+editProvider : String -> (Provider -> Provider) -> Model -> ( Model, Cmd Msg )
+editProvider providerId change model =
+    let
+        edited =
+            { model
+                | providers =
+                    List.map
+                        (\configured ->
+                            if configured.id == providerId then
+                                change configured
+
+                            else
+                                configured
+                        )
+                        model.providers
+            }
+    in
+    ( edited, persistProviders edited )
+
+
+persistProviders : Model -> Cmd Msg
+persistProviders model =
+    InteropPorts.fromElm
+        (StorageSet providersStorageKey (Provider.encodeAll model.providers))
 
 
 encodeStrings : List String -> String
@@ -505,6 +551,75 @@ update msg model =
             in
             ( shared, shareModels shared )
 
+        OpenConfig ->
+            let
+                ( config, cmd ) =
+                    Dialog.open (configDialogConfig model) model.config
+            in
+            ( { model | config = config }, cmd )
+
+        ConfigMsg dialogMsg ->
+            let
+                ( config, cmd ) =
+                    Dialog.update (configDialogConfig model) dialogMsg model.config
+            in
+            ( { model | config = config }, cmd )
+
+        ProviderLabelChanged providerId label ->
+            editProvider providerId (\configured -> { configured | label = label }) model
+
+        ProviderUrlChanged providerId baseUrl ->
+            editProvider providerId
+                (\configured ->
+                    { configured | baseUrl = baseUrl, status = Provider.Unchecked }
+                )
+                model
+
+        ProviderKeyChanged providerId apiKey ->
+            editProvider providerId
+                (\configured ->
+                    { configured
+                        | apiKey =
+                            if String.isEmpty apiKey then
+                                Nothing
+
+                            else
+                                Just apiKey
+                        , status = Provider.Unchecked
+                    }
+                )
+                model
+
+        AddProvider ->
+            let
+                added =
+                    { model
+                        | providers = model.providers ++ [ Provider.custom model.nextProviderId ]
+                        , nextProviderId = model.nextProviderId + 1
+                    }
+            in
+            ( added, persistProviders added )
+
+        RemoveProvider providerId ->
+            let
+                removed =
+                    { model
+                        | providers =
+                            List.filter (\configured -> configured.id /= providerId) model.providers
+                    }
+            in
+            ( removed, Cmd.batch [ persistProviders removed, shareModels removed ] )
+
+        ScanProviders ->
+            ( { model
+                | providers =
+                    List.map
+                        (\configured -> { configured | status = Provider.Checking })
+                        model.providers
+              }
+            , Cmd.batch [ persistProviders model, detectProviders model.providers ]
+            )
+
         ProviderModelsReceived providerId result ->
             let
                 status =
@@ -537,6 +652,7 @@ view model =
             ]
             [ viewSidebar model
             , viewSharingDialog model
+            , viewConfigDialog model
             , Button.new []
                 |> Button.withVariant Button.Ghost
                 |> Button.withOnClick CloseMobileSidebar
@@ -721,6 +837,16 @@ viewHeader model =
 
               else
                 iconButton "Delete current chat" Icon.Trash2 DeleteCurrentChat
+            , Button.new [ Icon.render Icon.Settings ]
+                |> Button.withVariant Button.Ghost
+                |> Button.withSize Button.Icon
+                |> Button.withOnClick OpenConfig
+                |> Button.withAttributes
+                    [ attribute "aria-label" "Configure providers"
+                    , title "Configure providers"
+                    , id "open-config"
+                    ]
+                |> Button.view
             , case model.theme of
                 Light ->
                     iconButton "Switch to dark theme" Icon.Moon ToggleTheme
@@ -749,6 +875,84 @@ sharingSummary model =
 
         shared ->
             "You share " ++ pluralize "model" shared ++ "."
+
+
+configDialogConfig : Model -> Dialog.Config Msg
+configDialogConfig model =
+    Dialog.new ConfigMsg [ text "Inference providers" ]
+        |> Dialog.withDescription
+            [ text "Any server speaking the OpenAI API works. Detected ones are filled in already." ]
+        |> Dialog.withRestoreFocusId "open-config"
+        |> Dialog.withContentAttributes [ class "sm:max-w-lg!" ]
+        |> Dialog.withContent
+            [ div [ class "flex flex-col gap-4 max-h-[55vh] overflow-y-auto pt-1 [scrollbar-width:thin]" ]
+                (List.map viewProviderRow model.providers)
+            , Dialog.footer []
+                [ Button.new [ Icon.render Icon.Plus, text "Add provider" ]
+                    |> Button.withVariant Button.Outline
+                    |> Button.withOnClick AddProvider
+                    |> Button.view
+                , Button.new [ Icon.render Icon.RefreshCw, text "Scan again" ]
+                    |> Button.withOnClick ScanProviders
+                    |> Button.view
+                ]
+            ]
+
+
+viewProviderRow : Provider -> Html Msg
+viewProviderRow configured =
+    div [ class "flex flex-col gap-2 rounded-lg border border-border p-3" ]
+        [ div [ class "flex items-center gap-2" ]
+            [ Input.new
+                |> Input.withAriaLabel "Provider name"
+                |> Input.withValue configured.label
+                |> Input.withOnInput (ProviderLabelChanged configured.id)
+                |> Input.withAttributes [ class "h-8! font-medium" ]
+                |> Input.view
+            , viewProviderStatus configured
+            , iconButton ("Remove " ++ configured.label) Icon.Trash2 (RemoveProvider configured.id)
+            ]
+        , Input.new
+            |> Input.withAriaLabel (configured.label ++ " address")
+            |> Input.withPlaceholder "http://localhost:11434"
+            |> Input.withValue configured.baseUrl
+            |> Input.withOnInput (ProviderUrlChanged configured.id)
+            |> Input.withAttributes [ class "h-8! text-[13px]!" ]
+            |> Input.view
+        , Input.new
+            |> Input.withType Input.Password
+            |> Input.withAriaLabel (configured.label ++ " API key")
+            |> Input.withPlaceholder "API key (optional)"
+            |> Input.withValue (Maybe.withDefault "" configured.apiKey)
+            |> Input.withOnInput (ProviderKeyChanged configured.id)
+            |> Input.withAttributes [ class "h-8! text-[13px]!" ]
+            |> Input.view
+        ]
+
+
+viewProviderStatus : Provider -> Html Msg
+viewProviderStatus configured =
+    let
+        label =
+            case configured.status of
+                Provider.Unchecked ->
+                    "Not scanned"
+
+                Provider.Checking ->
+                    "Scanning…"
+
+                Provider.Unavailable reason ->
+                    reason
+
+                Provider.Available available ->
+                    pluralize "model" available
+    in
+    span [ class "ml-auto flex-none text-[11px] text-muted-foreground" ] [ text label ]
+
+
+viewConfigDialog : Model -> Html Msg
+viewConfigDialog model =
+    Dialog.view model.config (configDialogConfig model)
 
 
 sharingDialogConfig : Model -> Dialog.Config Msg
@@ -1100,8 +1304,8 @@ composerHint model =
     if model.current.request /= Nothing then
         "Generating…"
 
-    else if List.isEmpty (Provider.localModels model.providers) then
-        "No models detected · check your provider"
+    else if List.isEmpty (availableModels model) then
+        "No models yet · add a provider or wait for peers"
 
     else
         case Chat.selectedModel model.current of
