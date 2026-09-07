@@ -673,8 +673,7 @@ view model =
                     text ""
 
                   else
-                    div [ class "mx-auto w-full max-w-[800px] flex-none px-8 pt-3 md:max-[1051px]:px-[26px] max-md:px-3.5 max-md:pt-2.5" ] [ viewComposer model ]
-                , p [ class "m-0 flex-none px-4 pt-3.5 pb-5 text-center text-[10px] tracking-[.15px] text-muted-foreground max-md:pb-[max(14px,env(safe-area-inset-bottom))]" ] [ text "A little curiosity goes a long way." ]
+                    div [ class "mx-auto w-full max-w-[800px] flex-none px-8 pt-3 pb-5 md:max-[1051px]:px-[26px] max-md:px-3.5 max-md:pt-2.5 max-md:pb-[max(14px,env(safe-area-inset-bottom))]" ] [ viewComposer model ]
                 ]
             ]
         ]
@@ -1150,6 +1149,7 @@ modelSelectConfig model =
     in
     Select.new ModelSelectMsg (\_ -> DomFinished)
         |> Select.withAriaLabel "Select model"
+        |> Select.withSize Select.Small
         |> Select.withAlign Popup.End
         |> Select.withDisabled (List.isEmpty available)
         |> Select.withPlaceholder
@@ -1169,7 +1169,7 @@ modelSelectConfig model =
                             |> Select.withItemContent
                                 [ Icon.render Icon.Zap
                                 , text model_.name
-                                , span [ class "ml-auto pl-3 text-[10px] text-muted-foreground" ]
+                                , span [ class "ml-auto pl-3 text-[10px] text-muted-foreground in-data-[slot=select-trigger]:hidden" ]
                                     [ text (availableLabel model_) ]
                                 ]
                             |> Select.item
@@ -1194,7 +1194,7 @@ viewComposer model =
     in
     div []
         [ form [ class """
-                    rounded-[19px] border border-border bg-background px-[13px] pt-[9px] pb-3
+                    flex items-end gap-2 rounded-[26px] border border-border bg-background py-1.5 pr-1.5 pl-[17px]
                     shadow-[0_5px_18px_#00000004,0_1px_3px_#00000004] transition-[border-color,box-shadow] duration-150 ease-[ease]
                     focus-within:border-ring focus-within:shadow-[0_0_0_2px_color-mix(in_srgb,var(--ring)_10%,transparent)]
                     """, onSubmit SendMessage ]
@@ -1203,18 +1203,16 @@ viewComposer model =
                 |> Textarea.withPlaceholder "Ask anything, or dream up something…"
                 |> Textarea.withValue conversation.draft
                 |> Textarea.withOnInput DraftChanged
-                |> Textarea.withAttributes [ class "min-h-[74px]! max-h-[220px] resize-none rounded-none! border-0! bg-transparent! px-[7px]! py-3! [font-family:inherit] text-sm! leading-[1.6]! shadow-none! focus-visible:outline-none! focus-visible:shadow-none! focus-visible:ring-0! max-md:text-base!", id "composer", rows 2, composerKeys, attribute "aria-describedby" "composer-hint" ]
+                |> Textarea.withAttributes [ class "min-h-0! max-h-[168px] min-w-0 flex-1 resize-none rounded-none! border-0! bg-transparent! px-0! py-[7px]! [font-family:inherit] text-sm! leading-[1.6]! shadow-none! focus-visible:outline-none! focus-visible:shadow-none! focus-visible:ring-0! max-md:text-base!", id "composer", rows 1, composerKeys, attribute "aria-describedby" "composer-hint" ]
                 |> Textarea.view
-            , div [ class "flex items-center justify-between gap-2 pl-1.5" ]
-                [ div [ class "ml-auto min-w-0" ]
-                    [ Select.view conversation.modelSelect (modelSelectConfig model) ]
-                , Button.new [ Icon.render Icon.ArrowUp ]
-                    |> Button.withType Button.Submit
-                    |> Button.withSize Button.Icon
-                    |> Button.withDisabled (not sendable)
-                    |> Button.withAttributes [ attribute "aria-label" "Send message", title "Send message" ]
-                    |> Button.view
-                ]
+            , div [ class "min-w-0 flex-none" ]
+                [ Select.view conversation.modelSelect (modelSelectConfig model) ]
+            , Button.new [ Icon.render Icon.ArrowUp ]
+                |> Button.withType Button.Submit
+                |> Button.withSize Button.Icon
+                |> Button.withDisabled (not sendable)
+                |> Button.withAttributes [ class "flex-none rounded-full!", attribute "aria-label" "Send message", title "Send message" ]
+                |> Button.view
             ]
         , p [ id "composer-hint", class "m-0 mt-[11px] flex justify-between gap-3 px-1 text-[10px] leading-[1.5] text-muted-foreground max-md:text-[9px] max-md:[&>span]:hidden" ]
             [ text (composerHint model)
