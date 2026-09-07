@@ -1159,7 +1159,8 @@ modelSelectConfig model =
              else
                 "Select model"
             )
-        |> Select.withTriggerAttributes [ attribute "aria-describedby" "composer-hint" ]
+        |> Select.withTriggerAttributes
+            [ class "h-8! rounded-full!", attribute "aria-describedby" "composer-hint" ]
         |> Select.withContentAttributes [ class "p-2" ]
         |> Select.withContent
             (Select.label [] [ text "Available models" ]
@@ -1203,7 +1204,7 @@ viewComposer model =
                 |> Textarea.withPlaceholder "Ask anything, or dream up something…"
                 |> Textarea.withValue conversation.draft
                 |> Textarea.withOnInput DraftChanged
-                |> Textarea.withAttributes [ class "min-h-0! max-h-[168px] min-w-0 flex-1 resize-none rounded-none! border-0! bg-transparent! px-0! py-[7px]! [font-family:inherit] text-sm! leading-[1.6]! shadow-none! focus-visible:outline-none! focus-visible:shadow-none! focus-visible:ring-0! max-md:text-base!", id "composer", rows 1, composerKeys, attribute "aria-describedby" "composer-hint" ]
+                |> Textarea.withAttributes [ class "min-h-0! max-h-[168px] min-w-0 flex-1 resize-none rounded-none! border-0! bg-transparent! px-0! py-[5px]! [font-family:inherit] text-sm! leading-[22px]! shadow-none! focus-visible:outline-none! focus-visible:shadow-none! focus-visible:ring-0! max-md:text-base!", id "composer", rows 1, composerKeys, attribute "aria-describedby" "composer-hint" ]
                 |> Textarea.view
             , div [ class "min-w-0 flex-none" ]
                 [ Select.view conversation.modelSelect (modelSelectConfig model) ]
