@@ -21,9 +21,9 @@ export interface ElmApp {
   };
 }
 
-export type FromElm = { data : { key : string; value : string }; tag : "storageSet" };
+export type FromElm = { data : { key : string }; tag : "storageGet" } | { data : { key : string; value : string }; tag : "storageSet" };
 
-export type ToElm = { tag : "authenticatedUser"; username : string };
+export type ToElm = { key : string; tag : "storageValue"; value : string | null };
 
 export type Flags = { theme : string };
 

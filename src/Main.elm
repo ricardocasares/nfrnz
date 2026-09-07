@@ -297,7 +297,7 @@ update msg model =
         DomFinished ->
             ( model, Cmd.none )
 
-        InteropMsgReceived (Ok (AuthenticatedUser _)) ->
+        InteropMsgReceived (Ok (StorageValue _ _)) ->
             ( model, Cmd.none )
 
         InteropMsgReceived (Err _) ->

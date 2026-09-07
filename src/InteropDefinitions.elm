@@ -20,14 +20,11 @@ interop =
 
 type FromElm
     = StorageSet String String
+    | StorageGet String
 
 
 type ToElm
-    = AuthenticatedUser User
-
-
-type alias User =
-    { username : String }
+    = StorageValue String (Maybe String)
 
 
 type alias Flags =
@@ -37,10 +34,13 @@ type alias Flags =
 fromElm : Encoder FromElm
 fromElm =
     TsEncode.union
-        (\vStorageSet value ->
+        (\vStorageSet vStorageGet value ->
             case value of
                 StorageSet key storageValue ->
                     vStorageSet ( key, storageValue )
+
+                StorageGet key ->
+                    vStorageGet key
         )
         |> TsEncode.variantTagged "storageSet"
             (TsEncode.object
@@ -48,17 +48,18 @@ fromElm =
                 , required "value" Tuple.second TsEncode.string
                 ]
             )
+        |> TsEncode.variantTagged "storageGet"
+            (TsEncode.object [ required "key" identity TsEncode.string ])
         |> TsEncode.buildUnion
 
 
 toElm : Decoder ToElm
 toElm =
     TsDecode.discriminatedUnion "tag"
-        [ ( "authenticatedUser"
-          , TsDecode.map AuthenticatedUser
-                (TsDecode.map User
-                    (TsDecode.field "username" TsDecode.string)
-                )
+        [ ( "storageValue"
+          , TsDecode.map2 StorageValue
+                (TsDecode.field "key" TsDecode.string)
+                (TsDecode.field "value" (TsDecode.nullable TsDecode.string))
           )
         ]
 
