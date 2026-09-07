@@ -9,13 +9,34 @@ type PeerTurn = { role: string; content: string };
 type PeerChunk = { requestId: string; content: string };
 type PeerEnd = { requestId: string; reason: string | null };
 
+const theme = window.localStorage.getItem('theme') ?? 'light';
+
+applyTheme(theme);
+
 const app = Elm.Main.init({
   flags: {
-    theme: window.localStorage.getItem('theme') ?? 'light',
+    theme,
     providers: window.localStorage.getItem('providers'),
     sharedModels: window.localStorage.getItem('sharedModels'),
   },
 });
+
+/**
+ * Dresses the whole document in a theme, so the browser's own furniture —
+ * scrollbars, form controls, the mobile address bar — follows the app.
+ */
+function applyTheme(name: string): void {
+  const root = document.documentElement;
+
+  root.classList.toggle('dark', name === 'dark');
+  root.style.colorScheme = name === 'dark' ? 'dark' : 'light';
+
+  const meta =
+    document.querySelector<HTMLMetaElement>('meta[name="theme-color"]') ??
+    document.head.appendChild(Object.assign(document.createElement('meta'), { name: 'theme-color' }));
+
+  meta.content = getComputedStyle(root).getPropertyValue('--background').trim();
+}
 
 /** Cancels in-flight completions by request id. */
 const streams = new Map<string, AbortController>();
@@ -133,6 +154,10 @@ app.ports.interopFromElm.subscribe((fromElm) => {
       streams.get(fromElm.data.requestId)?.abort();
       streams.delete(fromElm.data.requestId);
       asked.delete(fromElm.data.requestId);
+      break;
+
+    case 'applyTheme':
+      applyTheme(fromElm.data.theme);
       break;
 
     case 'shareModels':

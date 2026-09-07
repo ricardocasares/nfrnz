@@ -23,6 +23,7 @@ type FromElm
     | StorageGet String
     | StreamStart StreamRequest
     | StreamCancel String
+    | ApplyTheme String
     | ShareModels (List String)
     | AskPeer PeerRequest
     | RejectPeer String String String
@@ -79,7 +80,7 @@ type alias Flags =
 fromElm : Encoder FromElm
 fromElm =
     TsEncode.union
-        (\vStorageSet vStorageGet vStreamStart vStreamCancel vShareModels vAskPeer vRejectPeer value ->
+        (\vStorageSet vStorageGet vStreamStart vStreamCancel vApplyTheme vShareModels vAskPeer vRejectPeer value ->
             case value of
                 StorageSet key storageValue ->
                     vStorageSet ( key, storageValue )
@@ -92,6 +93,9 @@ fromElm =
 
                 StreamCancel requestId ->
                     vStreamCancel requestId
+
+                ApplyTheme theme ->
+                    vApplyTheme theme
 
                 ShareModels shared ->
                     vShareModels shared
@@ -122,6 +126,8 @@ fromElm =
             )
         |> TsEncode.variantTagged "streamCancel"
             (TsEncode.object [ required "requestId" identity TsEncode.string ])
+        |> TsEncode.variantTagged "applyTheme"
+            (TsEncode.object [ required "theme" identity TsEncode.string ])
         |> TsEncode.variantTagged "shareModels"
             (TsEncode.object [ required "models" identity (TsEncode.list TsEncode.string) ])
         |> TsEncode.variantTagged "askPeer" peerRequest

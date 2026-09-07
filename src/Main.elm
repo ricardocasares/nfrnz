@@ -480,7 +480,10 @@ update msg model =
                             Light
             in
             ( { model | theme = theme }
-            , InteropPorts.fromElm (StorageSet themeStorageKey (themeToString theme))
+            , Cmd.batch
+                [ InteropPorts.fromElm (StorageSet themeStorageKey (themeToString theme))
+                , InteropPorts.fromElm (ApplyTheme (themeToString theme))
+                ]
             )
 
         DomFinished ->
@@ -648,7 +651,6 @@ view model =
                     motion-reduce:[&_*]:scroll-auto! motion-reduce:[&_*::before]:transition-none! motion-reduce:[&_*::before]:animate-none! motion-reduce:[&_*::before]:scroll-auto!
                     motion-reduce:[&_*::after]:transition-none! motion-reduce:[&_*::after]:animate-none! motion-reduce:[&_*::after]:scroll-auto!
                     """
-            , classList [ ( "dark", model.theme == Dark ) ]
             ]
             [ viewSidebar model
             , viewSharingDialog model
