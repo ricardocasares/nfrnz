@@ -3,3 +3,4 @@ elm-stuff/
 src/interop.d.ts
 dist/
 .DS_Store
+.vercel
