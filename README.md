@@ -1,89 +1,75 @@
 # nfrnz
 
-An Elm application using Vite, vite-plugin-elm-watch, Tailwind CSS, and
-[elm-chadcn](https://github.com/mbr/elm-chadcn).
+nfrnz is a browser chat for OpenAI-compatible inference servers. It can use a
+server running on your own machine, or route a request through another nfrnz
+browser that has chosen to share that model.
 
-## Development
+## Run it
+
+Install dependencies and start the Vite development server:
 
 ```sh
 bun install
 bun run dev
 ```
 
-Open the local URL printed by the development server.
-Edit `src/Main.elm` to build the UI and add Tailwind utility classes with
-`Html.Attributes.class`. Theme tokens and Tailwind setup live in `src/style.css`.
+Open the local URL printed by Vite. For a production build, run `bun run build`
+and serve the generated `dist/` directory; `bun run preview` serves that build
+locally.
 
-## Production
+## Connect an inference server
+
+Open **Inference providers** in the app. nfrnz starts with these provider
+addresses and checks each one for models:
+
+| Provider | Default address |
+| --- | --- |
+| Ollama | `http://localhost:11434` |
+| LM Studio | `http://localhost:1234` |
+| llama.cpp | `http://localhost:8080` |
+
+The provider must expose the OpenAI-compatible `GET /v1/models` and
+`POST /v1/chat/completions` endpoints. Add or edit a provider to use another
+server, and enter an API key if it requires one. Since requests come directly
+from the browser, the server must be reachable from that browser and allow the
+app's origin through CORS.
+
+Choose an available model in the composer, write a prompt, and submit it. The
+browser sends the conversation turns to the selected server and displays the
+assistant response as it streams back. A failed request is shown in the chat.
+The current chat and chat history live in memory, so reloading the page clears
+them.
+
+## Share models with peers
+
+nfrnz instances join the same Trystero Nostr lobby. The sidebar reports the
+connected peer count and **Share models** lets you choose which of your
+currently available local models peers can use. Other peers' offered models
+appear in the model picker. If a selected model is available both locally and
+through peers, a local provider is used first; otherwise nfrnz asks the first
+peer offering it.
+
+When another peer requests a model you share, your browser sends that peer's
+conversation turns to your configured inference server and relays the streamed
+answer back. Sharing is available to anyone in the lobby: only select models
+you are willing to serve, and remember that requests include conversation
+content. Provider API keys stay in your browser and are not sent to peers.
+Incoming requests are limited to 50 conversation turns.
+
+## What runs where
+
+Elm owns the interface and application behavior: provider configuration,
+discovery, model selection, chat state, and peer request routing. `src/main.ts`
+handles browser-only work: local storage, theme integration, fetch-based
+streaming, and the Trystero connection. `src/InteropDefinitions.elm` defines
+the typed Elm/TypeScript messages; `src/InteropPorts.elm` exposes their ports.
+After changing interop definitions, regenerate TypeScript declarations with:
 
 ```sh
-bun run build
-bun run preview
+bun run interop
 ```
 
-The production build is written to `dist/`.
-
-## Elm / TypeScript interop
-
-`src/InteropDefinitions.elm` is the source of truth for flags and port types.
-`src/InteropPorts.elm` provides typed flag decoding and port helpers, following
-the [elm-ts-interop setup guide](https://elm-ts-interop.com/setup/).
-
-`bun run interop` generates the ignored `src/interop.d.ts`. Development startup
-and Elm edits regenerate it automatically; `bun run typecheck` and production
-builds regenerate it before checking TypeScript. `src/elm.d.ts` adapts the
-generated `Main` type to vite-plugin-elm-watch's default export.
-
-The app currently passes `null` flags and has no port traffic. The generated
-`Alert` and `AuthenticatedUser` definitions are starter examples. Replace them
-when adding interop, decode flags with `InteropPorts.decodeFlags`, send commands
-with `InteropPorts.fromElm`, and subscribe with `InteropPorts.toElm`. Handle
-decoder errors in Elm; keep browser/API glue in `src/main.ts`.
-
-## Chat interface
-
-The interface uses elm-chadcn for the sidebar, buttons, search input, composer,
-messages, and status badge. Elm owns chat history, per-conversation drafts,
-search, theme switching, and desktop/mobile navigation. `src/main.ts` only
-loads styles and starts Elm.
-
-Enter submits a message; Shift+Enter adds a newline. Suggested prompts fill the
-composer for editing. Chats exist only in memory and reset on refresh. No
-inference provider is connected yet, so submitting shows your message and a
-connection notice, without generating an AI response.
-
-The composer model dropdown offers Balanced, Fast, and Reasoning preview options.
-Each chat remembers its selection for this session; these are placeholders until
-an inference provider supplies real models.
-
-## Components and theme
-
-Import components from the `ChadCn` namespace:
-
-```elm
-import ChadCn.Badge as Badge
-import Html exposing (Html, text)
-
-
-statusBadge : Html msg
-statusBadge =
-    Badge.new [ text "Ready" ]
-        |> Badge.withVariant Badge.Secondary
-        |> Badge.view
-```
-
-`src/style.css` supplies the semantic color tokens, radius scale, fonts, and
-shadcn data-attribute variants. Edit `:root` and `.dark` to customize the palette.
-Layout, sidebar dimensions, responsive states, and component styling use
-Tailwind classes directly in `src/Main.elm`. The Elm theme toggle adds `dark`
-to the app container.
-
-Vite adds the installed package's `src/ChadCn` directory to Tailwind's sources.
-The location follows `ELM_HOME` (defaulting to `~/.elm`) and the compiler and
-package versions in `elm.json`; no machine-specific path needs to be configured.
-
-## References
-
-- [elm-chadcn setup and component APIs](https://github.com/mbr/elm-chadcn)
-- [shadcn theming](https://ui.shadcn.com/docs/theming)
-- [Tailwind CSS with Vite](https://tailwindcss.com/docs/installation/using-vite)
+Provider addresses and API keys, the theme, and selected shared models persist
+in browser local storage. Chat transcripts do not persist. The UI uses
+elm-chadcn components and Tailwind CSS; theme tokens and global styles are in
+`src/style.css`.
